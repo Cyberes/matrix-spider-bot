@@ -13,7 +13,7 @@ from nio import (AsyncClient, CallEvent, JoinError, MatrixRoom, MegolmEvent, Pow
 conn = sqlite3.connect("matrix_rooms.db")
 c = conn.cursor()
 c.execute('''CREATE TABLE IF NOT EXISTS rooms (
-                room_id TEXT PRIMARY KEY, 
+                room_id TEXT PRIMARY KEY,
                 server_hostname TEXT,
                 room_name TEXT,
                 topic TEXT,
@@ -92,14 +92,13 @@ def handle_room_message(event, room_id, client):
         content = event.source
     elif isinstance(event, RoomMessageText):
         event_type = 'message'
-        content = event.body
+        content = event.source
         # Add any room IDs we find in the message to our database
         room_ids = re.findall(ROOM_ID_REGEX, event.body)
         for new_room_id in room_ids:
-            print('Found a room!')
-            insert_room(client.rooms[new_room_id])
-            # new_room_id = new_room_id[0] if new_room_id[0] else new_room_id[1]
+            print(new_room_id, room_id)
             if new_room_id not in client.rooms:
+                print(f'Found a new room: {room_id}')
                 asyncio.create_task(join_room(client, new_room_id))
     elif isinstance(event, RoomMessageEmote):
         event_type = 'emote'
@@ -187,6 +186,8 @@ async def join_room(client, room_id):
         print(f"Error while joining room {room_id}: {response.message}")
     else:
         print(f"Joined room {room_id}")
+        await client.sync(timeout=30000)
+        insert_room(client.rooms[room_id])
 
 
 def sanitize_room_id(room_id: str):
@@ -215,7 +216,6 @@ def insert_room(room: MatrixRoom):
     try:
         c.execute("INSERT INTO rooms (room_id, server_hostname, room_name, topic, snapshot_timestamp) VALUES (?, ?, ?, ?, ?)", (room_id, server_hostname, room_name, topic, snapshot_timestamp))
         conn.commit()
-        print(f"Added room: {room_id}")
     except sqlite3.IntegrityError:
         pass
 
