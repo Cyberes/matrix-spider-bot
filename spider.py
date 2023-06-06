@@ -1,17 +1,24 @@
+#!/usr/bin/env python3
 import asyncio
 import json
 import re
 import sqlite3
 import time
 
-from nio import (AsyncClient, CallEvent, JoinError, MegolmEvent, PowerLevelsEvent, RedactionEvent, RoomAvatarEvent, RoomCreateEvent, RoomEncryptedAudio, RoomEncryptedFile, RoomEncryptedImage, RoomEncryptedVideo, RoomEncryptionEvent, RoomGuestAccessEvent, RoomHistoryVisibilityEvent,
+from nio import (AsyncClient, CallEvent, JoinError, MatrixRoom, MegolmEvent, PowerLevelsEvent, RedactionEvent, RoomAvatarEvent, RoomCreateEvent, RoomEncryptedAudio, RoomEncryptedFile, RoomEncryptedImage, RoomEncryptedVideo, RoomEncryptionEvent, RoomGuestAccessEvent, RoomHistoryVisibilityEvent,
                  RoomJoinRulesEvent, RoomMemberEvent, RoomMessageAudio, RoomMessageEmote, RoomMessageFile, RoomMessageImage, RoomMessageNotice, RoomMessageText, RoomMessageUnknown, RoomMessageVideo, RoomMessagesError, RoomNameEvent, RoomTopicEvent, RoomUpgradeEvent, StickerEvent,
                  UnknownEncryptedEvent, UnknownEvent)
 
 # SQLite database setup
 conn = sqlite3.connect("matrix_rooms.db")
 c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS rooms (room_id TEXT PRIMARY KEY, server_hostname TEXT)''')
+c.execute('''CREATE TABLE IF NOT EXISTS rooms (
+                room_id TEXT PRIMARY KEY, 
+                server_hostname TEXT,
+                room_name TEXT,
+                topic TEXT,
+                snapshot_timestamp INTEGER
+                )''')
 c.execute('''CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY,
                 event_id TEXT UNIQUE,
@@ -26,10 +33,7 @@ c.execute('''CREATE TABLE IF NOT EXISTS room_members (
                 room_id TEXT,
                 user_id TEXT,
                 server_hostname TEXT,
-                room_name TEXT,
-                topic TEXT,
                 snapshot_timestamp INTEGER,
-                current_timestamp INTEGER,
                 UNIQUE (room_id, user_id)
             )''')
 conn.commit()
@@ -92,7 +96,8 @@ def handle_room_message(event, room_id, client):
         # Add any room IDs we find in the message to our database
         room_ids = re.findall(ROOM_ID_REGEX, event.body)
         for new_room_id in room_ids:
-            insert_room(new_room_id)
+            print('Found a room!')
+            insert_room(client.rooms[new_room_id])
             # new_room_id = new_room_id[0] if new_room_id[0] else new_room_id[1]
             if new_room_id not in client.rooms:
                 asyncio.create_task(join_room(client, new_room_id))
@@ -165,14 +170,11 @@ def handle_room_message(event, room_id, client):
 
 def store_room_members(room_id, room):
     snapshot_timestamp = int(time.time())
-    room_name = room.display_name
-    topic = room.topic
-
     for user_id in room.users:
         server_hostname = user_id.split(":")[1]
         try:
-            c.execute("INSERT INTO room_members (room_id, user_id, server_hostname, room_name, topic, snapshot_timestamp, current_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                      (room_id, user_id, server_hostname, room_name, topic, snapshot_timestamp, snapshot_timestamp))
+            c.execute("INSERT INTO room_members (room_id, user_id, server_hostname, snapshot_timestamp) VALUES (?, ?, ?, ?)",
+                      (room_id, user_id, server_hostname, snapshot_timestamp))
             conn.commit()
             print(f"Added member {user_id} to room {room_id}")
         except sqlite3.IntegrityError:
@@ -205,10 +207,13 @@ def sanitize_room_id(room_id: str):
     return room_id, server_hostname
 
 
-def insert_room(room_id: str):
-    room_id, server_hostname = sanitize_room_id(room_id)
+def insert_room(room: MatrixRoom):
+    snapshot_timestamp = int(time.time())
+    room_name = room.display_name
+    topic = room.topic
+    room_id, server_hostname = sanitize_room_id(room.room_id)
     try:
-        c.execute("INSERT INTO rooms (room_id, server_hostname) VALUES (?, ?)", (room_id, server_hostname))
+        c.execute("INSERT INTO rooms (room_id, server_hostname, room_name, topic, snapshot_timestamp) VALUES (?, ?, ?, ?, ?)", (room_id, server_hostname, room_name, topic, snapshot_timestamp))
         conn.commit()
         print(f"Added room: {room_id}")
     except sqlite3.IntegrityError:
@@ -231,7 +236,7 @@ async def crawl_room_history(client, room_id):
         room = client.rooms[room_id]
         store_room_members(room_id, room)
 
-        insert_room(room_id)
+        insert_room(room)
 
         for event in response.chunk:
             handle_room_message(event, room_id, client)
@@ -252,8 +257,10 @@ async def main():
             # Crawl through the history of each joined room
             for room_id in client.rooms:
                 print(f"Crawling room history: {room_id}")
-
                 await crawl_room_history(client, room_id)
+
+            # TODO: parse https://matrix-client.matrix.org/_matrix/client/r0/publicRooms?limit=1000 to get more rooms to crawl
+            # TODO: thread the crawlers for each room
 
             print('Crawl complete!')
             print('===============================')
